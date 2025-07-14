@@ -2,7 +2,7 @@
 
 > **用 GitHub Issues + Actions + LLM 打造的「arXiv 论文 / 技术博客」阅读‑笔记‑推荐一体化系统**
 >
-> * **数据来源**：arXiv、各类技术博客（无 PDF）。
+> * **数据来源**：arXiv、各类技术博客。
 > * **核心理念**：笔记 = Issue，Issue = 结构化数据行 → 可编程、可追溯、便于协作。
 
 ---
@@ -78,7 +78,7 @@ body:
     attributes:
       value: |
         <!--
-        embedding: 自动写入 (OpenAI Embedding 1536-dim)；勿手改。
+        kg_triples: 自动写入 (YAML 三元组；勿手改)
         -->
 ```
 
@@ -86,13 +86,37 @@ body:
 
 ---
 
-## 🤖 自动化工作流
+## 🕸️ 知识图谱流水线
 
-| Workflow                | 触发                 | 主要步骤                                                                                              | 输出                          |
-| ----------------------- | ------------------ | ------------------------------------------------------------------------------------------------- | --------------------------- |
-| `summarize_cluster.yml` | `schedule: weekly` | GraphQL 拉取近 N 篇 **done** 状态 Issue → `scripts/summarize.py` → 新建 `Weekly-Digest #编号` Issue         | 聚合摘要（研究方向 / 方法/数据集 / 共性与趋势） |
-| `recommend_next.yml`    | `schedule: daily`  | 读取最近 20 条笔记 embedding → arXiv API (query=关键词) → 相似度 rerank → `scripts/recommend.py` → 起草 Issue 草稿 | `[Suggest]` 标题的待阅 Issue     |
-| `sync_to_obsidian.yml`  | `push`             | 把所有 Issue 转 Markdown → `vault/✈️_inbox/`                                                          | 本地离线阅读                      |
+本仓库采用“**摘要 → 标签/三元组 → Neo4j 图数据库 → 图 + 向量混合检索**”的轻量方案。
+
+1. **抽取** (`abstract_tag.yml`)：对新建 Issue
+
+   1. GPT‑3.5 -turbo 将正文截断为 ≤200 token 摘要；
+   2. 同一次调用输出 **YAML 标签** (method／task／dataset…)；
+   3. 再调用一个小模型将摘要转换为 **RDF 三元组** 写入隐藏注释 `<!-- kg_triples: ... -->`。
+2. **入库** (`graph_ingest.yml`)：每日 cron
+
+   1. 解析所有新 `kg_triples`；
+   2. 用 `neo4j-admin import` 或 Cypher `MERGE` 把实体/关系写入本地 Docker Neo4j；
+   3. 同时生成 **稀疏标签向量** 存进 `data/vectors.parquet` 供快速 KNN。
+3. **推荐** (`recommend_next.yml`)
+
+   1. 最近 N 篇 Issue → 聚合其标签向量求质心；
+   2. 用 pgvector/HNSW 检索候选 50 篇；
+   3. 在 Neo4j 图中计算两跳共现度 + PageRank 重排序；
+   4. 生成 `[Suggest]` Issue 草稿。
+4. **周报** (`summarize_cluster.yml`)：与旧方案相同，但附加一张 **知识图谱子图** PNG（由 `scripts/draw_subgraph.py` 读取 Neo4j、NetworkX 绘制）。
+5. **同步** (`sync_to_obsidian.yml`)：保持不变。
+
+> **费用**：每日摘要+标签+三元组约 500 token/篇，周 50 篇 ≈ 25 k token ⇒ 0.013 USD；Neo4j 本地运行，零云成本。
+
+---
+
+\----- | ---- | -------- | ---- |
+\| `summarize_cluster.yml` | `schedule: weekly` | GraphQL 拉取近 N 篇 **done** 状态 Issue → `scripts/summarize.py` → 新建 `Weekly-Digest #编号` Issue | 聚合摘要（研究方向 / 方法/数据集 / 共性与趋势） |
+\| `recommend_next.yml` | `schedule: daily` | 读取最近 20 条笔记 embedding → arXiv API (query=关键词) → 相似度 rerank → `scripts/recommend.py` → 起草 Issue 草稿 | `[Suggest]` 标题的待阅 Issue |
+\| `sync_to_obsidian.yml` | `push` | 把所有 Issue 转 Markdown → `vault/✈️_inbox/` | 本地离线阅读 |
 
 全部工作流均在 **UTC 时间** 执行，遵守 [https://docs.github.com/actions/using-workflows/about-workflows](https://docs.github.com/actions/using-workflows/about-workflows)。
 
